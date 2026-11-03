@@ -1,0 +1,21 @@
+[package]
+name = "glassbox"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "An x-ray SQL shell for cmudb: watch rows flow through the plan and pages move through the buffer pool."
+
+[dependencies]
+cmudb = { git = "https://github.com/boristopalov/cmudb", branch = "main" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4.29"
+parking_lot = "0.12.5"
+sqlparser = "0.62.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

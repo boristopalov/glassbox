@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glass Box · cmudb</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='none' stroke='%2300f0ff' stroke-width='3'/%3E%3Crect x='11' y='11' width='10' height='10' rx='2' fill='%23ff2bd6'/%3E%3C/svg%3E">
+</head>
+<body>
+<canvas id="bg"></canvas>
+<div id="app">
+  <header id="top">
+    <div class="brand">
+      <div class="logo"><span></span></div>
+      <div>
+        <h1>GLASS<b>BOX</b></h1>
+        <div class="sub">x-ray SQL shell for <em>cmudb</em></div>
+      </div>
+    </div>
+    <div class="meters">
+      <div class="meter"><label>hit rate</label><div class="ring" id="m-hitrate"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15" class="track"/><circle cx="18" cy="18" r="15" class="fill"/></svg><span>–</span></div></div>
+      <div class="meter"><label>hits</label><b id="m-hits">0</b></div>
+      <div class="meter"><label>misses</label><b id="m-misses" class="amber">0</b></div>
+      <div class="meter"><label>evictions</label><b id="m-evict" class="red">0</b></div>
+      <div class="meter"><label>disk r / w</label><b id="m-io">0 / 0</b></div>
+      <div class="meter"><label>rows out</label><b id="m-rows" class="cyan">0</b></div>
+    </div>
+    <div class="right">
+      <span id="txn" class="badge hidden">TXN OPEN</span>
+      <span class="badge dim" id="engine-info">cmudb</span>
+      <button id="reset" class="ghost" title="Throw the database away and reload the demo data">reset db</button>
+    </div>
+  </header>
+
+  <section id="left" class="panel">
+    <div class="panel-head"><span class="dot cyan"></span>query <span class="hint">⌘/ctrl + enter</span></div>
+    <div id="editor-wrap">
+      <pre id="hl" aria-hidden="true"></pre>
+      <textarea id="sql" spellcheck="false" autocomplete="off"></textarea>
+    </div>
+    <div class="row run-row">
+      <button id="run" class="primary"><span>▶</span> run</button>
+      <label class="batch">rows / batch <input type="range" id="batch" min="0" max="10" step="1"><b id="batch-v">64</b></label>
+    </div>
+    <div id="examples"></div>
+    <div id="schema"></div>
+    <div class="panel-head results-head"><span class="dot magenta"></span>result <span id="result-meta" class="hint"></span></div>
+    <div id="stmts"></div>
+    <div id="result"></div>
+  </section>
+
+  <section id="mid" class="panel">
+    <div class="panel-head"><span class="dot violet"></span>plan <span class="hint">rows flow upward, one particle per batch</span><span id="plan-meta" class="hint right"></span></div>
+    <canvas id="plan"></canvas>
+    <div id="plan-empty" class="empty">run a query to see its plan light up</div>
+  </section>
+
+  <section id="right" class="panel">
+    <div class="panel-head"><span class="dot amber"></span>buffer pool <span class="hint" id="pool-meta"></span>
+      <span class="leds"><i id="led-r" title="disk read"></i><i id="led-w" title="disk write"></i></span></div>
+    <canvas id="pool"></canvas>
+    <div class="panel-head sub-head"><span class="dot green"></span>arc replacer <span class="hint">once ‖ again · ghosts at edges</span></div>
+    <canvas id="arc"></canvas>
+    <div id="legend"></div>
+  </section>
+
+  <footer id="bottom" class="panel">
+    <div class="transport">
+      <button id="play" class="round" title="play / pause (space)">▶</button>
+      <button id="restart" class="round small" title="replay from the start">↺</button>
+      <div class="speeds" id="speeds"></div>
+    </div>
+    <div class="timeline-wrap">
+      <canvas id="timeline"></canvas>
+      <div id="clock" class="clock">0 / 0</div>
+    </div>
+    <div id="ticker"></div>
+  </footer>
+</div>
+<canvas id="overlay"></canvas>
+<script src="/app.js"></script>
+</body>
+</html>
