@@ -1,9 +1,10 @@
 # Glass Box
 
-An x-ray SQL shell for [cmudb](https://github.com/boristopalov/cmudb). Type SQL and watch
-it run: rows stream up the plan tree batch by batch, buffer pool frames light up on every
-hit, miss and eviction, pages slide between the ARC replacer's lists, and index scans show
-the B+ tree path they walked.
+An x-ray SQL shell for [cmudb](https://github.com/boristopalov/cmudb), as a 3D scene you can
+fly around. Type SQL and watch it run: rows stream up the plan tree batch by batch, buffer
+pool frames light up on every hit, miss and eviction, pages slide between the ARC
+replacer's lists, the disk spins up on reads and writes, and index scans trace their B+ tree
+path across the pool.
 
 ![A hash join replaying in Glass Box](docs/screenshot.png)
 
@@ -31,20 +32,31 @@ adapt. Raise `--frames` to watch the same query turn into hits.
 
 ## What you are looking at
 
-- **Plan**: each operator is a card. A particle flies up an edge for every batch it hands
-  its parent; the count on the edge is rows so far. Cards show rows out, batches, and
-  the pages that operator touched (hits, misses, new pages), or the B+ tree path
-  (header › internal › leaf) for index lookups.
+Drag to orbit, scroll to zoom, right drag to pan, or jump with the camera buttons
+(overview, plan, pool, arc, disk). `orbit` slowly circles the scene. Click anything to see it
+in the inspector; hover for a quick label.
+
+- **Plan tree**: each operator is a glass slab floating behind the pool, with live rows,
+  batches and page counts on its face. A glowing particle climbs an edge for every batch an
+  operator hands its parent, and the root feeds a ring at the top: the client.
 - **Buffer pool**: one tile per frame, coloured by owner (table heap, index, sort spill,
-  catalog). Loads drop in with a beam to the operator that asked for the page, evictions
-  fade out red, a dot marks dirty pages, and the bar on index pages shows how full they are.
-- **ARC replacer**: T1 (seen once) and T2 (seen again) grow from the middle; ghosts in B1 and
-  B2 sit at the edges. The marker is ARC's target size p, which moves as ghosts get hit.
+  catalog). Pages rise out of the platform when loaded, pulse on hits, and burst red when
+  evicted. A beam arcs from the tile to the operator that asked for it, a dot marks dirty
+  pages, and the bar on index pages shows how full they are.
+- **B+ tree paths**: while an index operator runs, the header, internal and leaf pages it
+  walked are linked by a green arc across the pool.
+- **ARC replacer**: the lanes in front of the pool. T1 (seen once) and T2 (seen again) share
+  the cache box; ghosts in B1 and B2 sit outside it. The green post is ARC's target size p.
+- **Disk**: the platter below. Reads fly up to their frame, writes fall back down.
 - **Timeline**: the whole run is recorded, then replayed. Drag to scrub, space to pause,
   ←/→ to step, and pick a speed from 0.1× to 10×. The heat strip shows hits, misses and
   evictions over time, and the ticker narrates each event.
 - **Statements**: several statements run as one script (try the `transaction` example).
   Each gets a chip with its own result, and an error stops the script there.
+
+![The plan tree up close](docs/plan.png)
+
+![An index join from above the pool](docs/pool.png)
 
 ## How it works
 
@@ -59,13 +71,13 @@ Glass Box embeds cmudb as a library and changes nothing in it.
 - `src/explain.rs` turns cmudb's plan into the tree the UI draws.
 - `src/engine.rs` plans and runs statements, handles `BEGIN`/`COMMIT`/`ROLLBACK`, and records
   each run as a timestamped event trace.
-- `src/server.rs` is a small axum server. The UI in `web/` is plain JS and canvas, compiled
-  into the binary, so there is no build step.
+- `src/server.rs` is a small axum server. The UI in `web/` is plain JS modules: `app.js`
+  replays the trace and runs the panels, `scene.js` draws the 3D world with three.js.
+  three.js is vendored in `web/vendor/three` (MIT, see its LICENSE) and everything is
+  compiled into the binary, so there is no build step and three.js never comes from a CDN.
 
 cmudb is pinned through `Cargo.lock`. The probe reads cmudb's log text, so a change to
 those messages upstream can break it; `cargo test` catches that.
-
-![An external sort spilling runs](docs/sort.png)
 
 ## Develop
 

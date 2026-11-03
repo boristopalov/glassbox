@@ -11,7 +11,8 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='4' y='4' width='24' height='24' rx='6' fill='none' stroke='%2300f0ff' stroke-width='3'/%3E%3Crect x='11' y='11' width='10' height='10' rx='2' fill='%23ff2bd6'/%3E%3C/svg%3E">
 </head>
 <body>
-<canvas id="bg"></canvas>
+<div id="stage"></div>
+<div id="tip" class="hidden"></div>
 <div id="app">
   <header id="top">
     <div class="brand">
@@ -53,18 +54,23 @@
     <div id="result"></div>
   </section>
 
-  <section id="mid" class="panel">
-    <div class="panel-head"><span class="dot violet"></span>plan <span class="hint">rows flow upward, one particle per batch</span><span id="plan-meta" class="hint right"></span></div>
-    <canvas id="plan"></canvas>
-    <div id="plan-empty" class="empty">run a query to see its plan light up</div>
+  <section id="views">
+    <span class="views-label">camera</span>
+    <button data-view="overview" class="on">overview</button>
+    <button data-view="plan">plan</button>
+    <button data-view="pool">pool</button>
+    <button data-view="arc">arc</button>
+    <button data-view="disk">disk</button>
+    <button id="orbit" title="slowly circle the scene">orbit</button>
   </section>
 
+  <div id="stage-msg" class="hidden"></div>
+
   <section id="right" class="panel">
-    <div class="panel-head"><span class="dot amber"></span>buffer pool <span class="hint" id="pool-meta"></span>
+    <div class="panel-head"><span class="dot amber"></span>inspector
       <span class="leds"><i id="led-r" title="disk read"></i><i id="led-w" title="disk write"></i></span></div>
-    <canvas id="pool"></canvas>
-    <div class="panel-head sub-head"><span class="dot green"></span>arc replacer <span class="hint">once ‖ again · ghosts at edges</span></div>
-    <canvas id="arc"></canvas>
+    <div id="inspect"><div class="idle">click a plan node, a frame or a lane page<br>drag to orbit · scroll to zoom · right drag to pan</div></div>
+    <div class="panel-head sub-head"><span class="dot green"></span>buffer pool <span class="hint" id="pool-meta"></span></div>
     <div id="legend"></div>
   </section>
 
@@ -81,7 +87,9 @@
     <div id="ticker"></div>
   </footer>
 </div>
-<canvas id="overlay"></canvas>
-<script src="/app.js"></script>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/three.module.min.js", "three/addons/": "/vendor/three/addons/" } }
+</script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

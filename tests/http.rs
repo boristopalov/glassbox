@@ -53,8 +53,11 @@ async fn the_page_and_its_assets_are_served() {
     let app = app();
     for (path, needle) in [
         ("/", "GLASS"),
-        ("/app.js", "function"),
+        ("/app.js", "createScene"),
+        ("/scene.js", "WebGLRenderer"),
         ("/style.css", "--cyan"),
+        ("/vendor/three/three.module.min.js", "WebGLRenderer"),
+        ("/vendor/three/LICENSE", "MIT"),
     ] {
         let (status, body) = send(&app, Request::get(path).body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::OK, "{path}");
@@ -63,6 +66,73 @@ async fn the_page_and_its_assets_are_served() {
             "{path} holds {needle}"
         );
     }
+}
+
+/// Follows every `import ... from "..."` starting at app.js, resolving bare names through the
+/// page's import map, so a missing vendored file fails here instead of in the browser.
+#[tokio::test]
+async fn every_module_the_page_imports_is_served() {
+    let _turn = SERIAL.lock().await;
+    let app = app();
+    let (_, html) = send(&app, Request::get("/").body(Body::empty()).unwrap()).await;
+    let html = String::from_utf8_lossy(&html).into_owned();
+    let mut pending = vec!["/app.js".to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let (status, body) = send(
+            &app,
+            Request::get(path.as_str()).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let src = String::from_utf8_lossy(&body).into_owned();
+        for spec in imports(&src) {
+            pending.push(resolve(&path, &spec, &html));
+        }
+    }
+    assert!(seen.contains("/vendor/three/three.module.min.js"));
+    assert!(seen.contains("/vendor/three/addons/shaders/CopyShader.js"));
+}
+
+fn imports(src: &str) -> Vec<String> {
+    src.split(" from ")
+        .skip(1)
+        .filter_map(|rest| {
+            let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            rest[1..].split(quote).next().map(str::to_string)
+        })
+        .collect()
+}
+
+fn resolve(from: &str, spec: &str, html: &str) -> String {
+    let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
+    if let Some(rel) = spec.strip_prefix("./") {
+        return format!("{dir}/{rel}");
+    }
+    if let Some(rel) = spec.strip_prefix("../") {
+        let up = dir.rsplit_once('/').map_or("", |(d, _)| d);
+        return format!("{up}/{rel}");
+    }
+    let entry = |key: &str| {
+        let needle = format!("\"{key}\": \"");
+        html.split(&needle)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .map(str::to_string)
+    };
+    if spec == "three" {
+        return entry("three").expect("the import map names three");
+    }
+    let rest = spec
+        .strip_prefix("three/addons/")
+        .unwrap_or_else(|| panic!("{from} imports {spec}, which the import map does not cover"));
+    format!(
+        "{}{rest}",
+        entry("three/addons/").expect("the import map names three/addons/")
+    )
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-"use strict";
+import { createScene } from "./scene.js";
 
 const $ = (s) => document.querySelector(s);
 const DPR = () => Math.min(window.devicePixelRatio || 1, 2);
@@ -20,7 +20,6 @@ const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 10];
 const SNAP_EVERY = 1500;
 const LANES = ["T1", "T2", "B1", "B2"];
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
-const SANS = '"Space Grotesk", ui-sans-serif, sans-serif';
 
 const S = {
   frames: 0,
@@ -36,12 +35,8 @@ const S = {
   rate: 300,
   stmtShown: -1,
   plans: [],
-  particles: [],
-  flashes: [],
-  beams: [],
-  nodeHeat: new Map(),
-  arcPos: new Map(),
-  frameAnim: [],
+  planShown: null,
+  selection: null,
   ledR: 0,
   ledW: 0,
   rowsShown: -1,
@@ -49,8 +44,6 @@ const S = {
   busy: false,
   timelineImg: null,
   dirtyUI: true,
-  hover: null,
-  arcTarget: null,
 };
 
 /* ---------- model: the buffer pool and plan state at a point in the trace ---------- */
@@ -217,10 +210,8 @@ function loadTrace(trace) {
   S.plans = trace.statements.map((s) => (s.plan ? layoutPlan(s.plan) : null));
   S.cursor = 0;
   S.applied = 0;
-  S.particles = [];
-  S.flashes = [];
-  S.beams = [];
-  S.nodeHeat.clear();
+  scene.clearEffects();
+  S.planShown = null;
   S.rowsShown = -1;
   const n = ev.length;
   const duration = clamp(n / 140, 2.4, 9);
@@ -242,7 +233,7 @@ function seek(target) {
     const si = Math.min(Math.floor(whole / SNAP_EVERY), S.snaps.length - 1);
     S.model = cloneModel(S.snaps[si]);
     S.applied = si * SNAP_EVERY;
-    S.particles = [];
+    scene.clearEffects();
   }
   const ev = S.trace.events;
   while (S.applied < whole) apply(S.model, ev[S.applied++]);
@@ -273,43 +264,11 @@ function advance(dt) {
 /* ---------- visual effects ---------- */
 
 function effect(e) {
-  const t = now();
-  switch (e.k) {
-    case "batch": {
-      const plan = S.plans[S.model.stmt];
-      if (!plan) break;
-      const nd = plan.byId.get(e.n);
-      if (!nd) break;
-      if (S.particles.length < 420) S.particles.push({ n: e.n, rows: e.rows, t0: t, color: FAMILY[nd.family] || C.cyan, stmt: S.model.stmt });
-      S.nodeHeat.set(S.model.stmt + ":" + e.n, t);
-      break;
-    }
-    case "hit":
-      S.flashes.push({ f: e.f, t0: t, color: e.w ? C.magenta : C.cyan, kind: "hit", strength: Math.min(1, 0.45 + (e.x || 0) * 0.08) });
-      if (e.n != null) S.nodeHeat.set(S.model.stmt + ":" + e.n, t);
-      break;
-    case "load": {
-      const color = e.how === "new" ? C.green : e.how === "ghost" ? C.violet : C.amber;
-      S.flashes.push({ f: e.f, t0: t, color, kind: "load", strength: 1 });
-      S.frameAnim[e.f] = { t0: t, kind: "in" };
-      if (e.n != null && S.beams.length < 60) S.beams.push({ f: e.f, n: e.n, t0: t, color, stmt: S.model.stmt });
-      break;
-    }
-    case "evict":
-      S.flashes.push({ f: e.f, t0: t, color: C.red, kind: "evict", strength: 1, p: e.p, o: S.model.owner.get(e.p) });
-      break;
-    case "free":
-      S.flashes.push({ f: -1, t0: t, color: SPILL_COLOR, kind: "free", strength: 1 });
-      break;
-    case "io":
-      if (e.w) S.ledW = t; else S.ledR = t;
-      break;
-  }
+  if (e.k === "io") { if (e.w) S.ledW = now(); else S.ledR = now(); }
+  scene.effect(e, S.model);
 }
 
-/* ---------- plan layout and drawing ---------- */
-
-const NODE_W = 216, NODE_H = 100, GAP_X = 26, GAP_Y = 60;
+/* ---------- plan layout ---------- */
 
 function layoutPlan(root) {
   const nodes = [];
@@ -328,18 +287,9 @@ function layoutPlan(root) {
     }
     nodes.push(n);
   })(root, 0);
-  const w = leaf * NODE_W + (leaf - 1) * GAP_X;
-  const h = (depthMax + 1) * NODE_H + depthMax * GAP_Y;
-  for (const n of nodes) {
-    n.x = n.lx * (NODE_W + GAP_X);
-    n.y = n.depth * (NODE_H + GAP_Y);
-  }
-  return { root, nodes, byId, parent, w, h };
+  return { root, nodes, byId, parent };
 }
 
-const planCv = $("#plan");
-const planCx = planCv.getContext("2d");
-let planView = { scale: 1, ox: 0, oy: 0 };
 
 function fitCanvas(cv) {
   const r = cv.getBoundingClientRect();
@@ -360,29 +310,9 @@ function roundRect(cx, x, y, w, h, r) {
   cx.closePath();
 }
 
-function trunc(cx, text, max) {
-  if (cx.measureText(text).width <= max) return text;
-  let lo = 0, hi = text.length;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (cx.measureText(text.slice(0, mid) + "…").width <= max) lo = mid; else hi = mid - 1;
-  }
-  return text.slice(0, lo) + "…";
-}
-
 function hexA(hex, a) {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-}
-
-function edgePoint(child, par, t) {
-  const x0 = child.x + NODE_W / 2, y0 = child.y;
-  const x1 = par.x + NODE_W / 2, y1 = par.y + NODE_H;
-  const my = (y0 + y1) / 2;
-  const u = 1 - t;
-  const x = u * u * u * x0 + 3 * u * u * t * x0 + 3 * u * t * t * x1 + t * t * t * x1;
-  const y = u * u * u * y0 + 3 * u * u * t * my + 3 * u * t * t * my + t * t * t * y1;
-  return [x, y];
 }
 
 function currentStmt() {
@@ -391,491 +321,6 @@ function currentStmt() {
   return clamp(S.model.stmt, 0, S.trace.statements.length - 1);
 }
 
-function drawPlan(t) {
-  const { w, h, d } = fitCanvas(planCv);
-  const cx = planCx;
-  cx.setTransform(d, 0, 0, d, 0, 0);
-  cx.clearRect(0, 0, w, h);
-  const si = currentStmt();
-  const plan = si >= 0 ? S.plans[si] : null;
-  $("#plan-empty").classList.toggle("hidden", !!S.trace);
-  if (!S.trace) return;
-  const st = S.trace.statements[si];
-  if (!plan) {
-    cx.textAlign = "center";
-    cx.fillStyle = C.ink3;
-    cx.font = `700 13px ${MONO}`;
-    const kw = st ? st.sql.trim().split(/\s+/)[0].toUpperCase() : "";
-    const why = st && st.outcome.kind === "error" ? "failed before it ran" : "runs without a plan tree";
-    cx.fillText(`${kw} · ${why}`, w / 2, h / 2);
-    return;
-  }
-  const pad = 28, top = 62;
-  const scale = Math.min(1.15, (w - pad * 2) / plan.w, (h - top - pad) / plan.h);
-  const ox = (w - plan.w * scale) / 2;
-  const oy = top + Math.max(0, (h - top - pad - plan.h * scale) / 2) * 0.35;
-  planView = { scale, ox, oy };
-  cx.save();
-  cx.translate(ox, oy);
-  cx.scale(scale, scale);
-
-  const m = S.model;
-  const live = S.stmtShown < 0 || S.stmtShown === m.stmt;
-  const stats = (n) => (live || m.stmt > si ? m.nodes[si + ":" + n] : null) || { rows: 0, batches: 0, state: "idle", hits: 0, misses: 0, news: 0, path: [] };
-
-  // client sink above the root
-  const root = plan.root;
-  const sx = root.x + NODE_W / 2;
-  const sinkY = -top / scale + 16;
-  cx.strokeStyle = hexA(C.cyan, 0.25);
-  cx.setLineDash([3, 5]);
-  cx.lineWidth = 1.2 / scale;
-  cx.beginPath(); cx.moveTo(sx, root.y); cx.lineTo(sx, sinkY + 10); cx.stroke();
-  cx.setLineDash([]);
-  cx.fillStyle = C.ink3;
-  cx.font = `700 ${10 / scale}px ${MONO}`;
-  cx.textAlign = "center";
-  const rowsOut = m.rows[si] || 0;
-  cx.fillText(`▲ CLIENT  ${fmt(live || m.stmt > si ? rowsOut : 0)} rows`, sx, sinkY);
-
-  // edges
-  for (const n of plan.nodes) {
-    for (const c of n.children) {
-      const cs = stats(c.id);
-      const width = 1.2 + Math.log10(1 + cs.rows) * 1.1;
-      const grad = cx.createLinearGradient(0, c.y, 0, n.y + NODE_H);
-      const col = FAMILY[c.family] || C.cyan;
-      grad.addColorStop(0, hexA(col, 0.55));
-      grad.addColorStop(1, hexA(FAMILY[n.family] || C.cyan, 0.35));
-      cx.strokeStyle = grad;
-      cx.lineWidth = width;
-      cx.beginPath();
-      const x0 = c.x + NODE_W / 2, y0 = c.y, x1 = n.x + NODE_W / 2, y1 = n.y + NODE_H, my = (y0 + y1) / 2;
-      cx.moveTo(x0, y0);
-      cx.bezierCurveTo(x0, my, x1, my, x1, y1);
-      cx.stroke();
-      if (cs.rows > 0) {
-        const [lx, ly] = edgePoint(c, n, 0.5);
-        cx.font = `600 10px ${MONO}`;
-        cx.textAlign = "left";
-        cx.fillStyle = hexA(col, 0.9);
-        cx.fillText(fmt(cs.rows), lx + 8, ly + 3);
-      }
-    }
-  }
-
-  // nodes
-  for (const n of plan.nodes) {
-    const ns = stats(n.id);
-    const col = FAMILY[n.family] || C.cyan;
-    const heat = S.nodeHeat.get(si + ":" + n.id);
-    const hot = heat ? Math.max(0, 1 - (t - heat) / 650) : 0;
-    const active = live && m.lastNode === n.id && S.playing;
-    cx.save();
-    if (hot > 0 || active) {
-      cx.shadowColor = col;
-      cx.shadowBlur = 10 + 28 * Math.max(hot, active ? 0.5 + 0.5 * Math.sin(t / 140) : 0);
-    }
-    roundRect(cx, n.x, n.y, NODE_W, NODE_H, 11);
-    const bg = cx.createLinearGradient(n.x, n.y, n.x, n.y + NODE_H);
-    bg.addColorStop(0, "rgba(16,26,52,0.97)");
-    bg.addColorStop(1, "rgba(8,13,28,0.97)");
-    cx.fillStyle = bg;
-    cx.fill();
-    cx.shadowBlur = 0;
-    const idle = ns.state === "idle";
-    cx.strokeStyle = hexA(col, idle ? 0.28 : 0.55 + 0.45 * hot);
-    cx.lineWidth = 1.3;
-    cx.stroke();
-    cx.restore();
-    // accent bar
-    cx.fillStyle = hexA(col, idle ? 0.35 : 0.9);
-    roundRect(cx, n.x, n.y + 10, 3, NODE_H - 20, 1.5);
-    cx.fill();
-
-    cx.textAlign = "left";
-    cx.font = `800 10px ${MONO}`;
-    cx.fillStyle = col;
-    cx.fillText(n.op.toUpperCase(), n.x + 14, n.y + 19);
-    cx.fillStyle = C.ink3;
-    cx.textAlign = "right";
-    cx.font = `600 9px ${MONO}`;
-    const stateLabel = { idle: "", open: "OPEN", run: "", done: "✓ DONE" }[ns.state] || "";
-    cx.fillStyle = ns.state === "done" ? hexA(C.green, 0.85) : C.ink3;
-    cx.fillText(stateLabel || "#" + n.id, n.x + NODE_W - 10, n.y + 19);
-    cx.textAlign = "left";
-    cx.fillStyle = C.ink;
-    cx.font = `600 12.5px ${SANS}`;
-    cx.fillText(trunc(cx, n.title, NODE_W - 26), n.x + 14, n.y + 37);
-    cx.fillStyle = C.ink3;
-    cx.font = `400 10px ${MONO}`;
-    cx.fillText(trunc(cx, n.detail.join(" · "), NODE_W - 26), n.x + 14, n.y + 52);
-    // rows line
-    cx.font = `800 15px ${MONO}`;
-    cx.fillStyle = ns.rows ? C.ink : C.ink3;
-    const rows = fmt(ns.rows);
-    cx.fillText(rows, n.x + 14, n.y + 74);
-    const rw = cx.measureText(rows).width;
-    cx.font = `500 9.5px ${MONO}`;
-    cx.fillStyle = C.ink3;
-    cx.fillText(`rows out · ${ns.batches} batch${ns.batches === 1 ? "" : "es"}`, n.x + 18 + rw, n.y + 74);
-    // pages line: the b+ tree path for index nodes, else hit/miss/new counts
-    cx.font = `600 9.5px ${MONO}`;
-    let px = n.x + 14;
-    const put = (txt, c) => { cx.fillStyle = c; cx.fillText(txt, px, n.y + 90); px += cx.measureText(txt).width + 8; };
-    if (ns.path.length) {
-      put("b+", C.ink3);
-      ns.path.forEach(([p, kind], i) => {
-        if (i) { px -= 4; put("›", C.ink3); px -= 4; }
-        put(`${KIND_GLYPH[kind]}${p}`, kind === "leaf" ? C.green : kind === "internal" ? C.violet : C.cyan);
-      });
-    } else if (ns.hits || ns.misses || ns.news) {
-      const parts = [];
-      if (ns.hits) parts.push([`●${fmt(ns.hits)}`, " hit", hexA(C.cyan, 0.85)]);
-      if (ns.misses) parts.push([`▼${fmt(ns.misses)}`, " miss", hexA(C.amber, 0.9)]);
-      if (ns.news) parts.push([`+${fmt(ns.news)}`, " new", hexA(C.green, 0.85)]);
-      const wide = (words) => cx.measureText("pages " + parts.map((q) => q[0] + (words ? q[1] : "")).join("  ")).width;
-      const words = wide(true) < NODE_W - 30;
-      put("pages", C.ink3);
-      for (const q of parts) put(q[0] + (words ? q[1] : ""), q[2]);
-    } else {
-      put(ns.state === "idle" ? "waiting" : "no page access", hexA(C.ink3, 0.7));
-    }
-    // heat bar
-    if (hot > 0) {
-      cx.fillStyle = hexA(col, 0.65 * hot);
-      roundRect(cx, n.x + 12, n.y + NODE_H - 5, (NODE_W - 24) * hot, 2, 1);
-      cx.fill();
-    }
-  }
-
-  // particles: one per batch, child -> parent (root -> client)
-  cx.globalCompositeOperation = "lighter";
-  const travel = 620 / Math.sqrt(Math.max(0.25, S.speed));
-  S.particles = S.particles.filter((p) => t - p.t0 < travel + 40);
-  for (const p of S.particles) {
-    if (p.stmt !== si) continue;
-    const k = clamp((t - p.t0) / travel, 0, 1);
-    const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
-    const c = plan.byId.get(p.n);
-    if (!c) continue;
-    let x, y;
-    const parId = plan.parent.get(p.n);
-    if (parId == null) {
-      x = c.x + NODE_W / 2;
-      y = lerp(c.y, sinkY + 14, ease);
-    } else {
-      [x, y] = edgePoint(c, plan.byId.get(parId), ease);
-    }
-    const r = clamp(2.2 + Math.sqrt(p.rows) * 0.55, 2.2, 12);
-    const fade = k > 0.85 ? (1 - k) / 0.15 : 1;
-    const g = cx.createRadialGradient(x, y, 0, x, y, r * 2.6);
-    g.addColorStop(0, hexA("#ffffff", 0.95 * fade));
-    g.addColorStop(0.25, hexA(p.color, 0.85 * fade));
-    g.addColorStop(1, hexA(p.color, 0));
-    cx.fillStyle = g;
-    cx.beginPath();
-    cx.arc(x, y, r * 2.6, 0, Math.PI * 2);
-    cx.fill();
-  }
-  cx.globalCompositeOperation = "source-over";
-  cx.restore();
-}
-
-function nodeScreenCenter(n) {
-  const plan = S.plans[S.model.stmt];
-  if (!plan || currentStmt() !== S.model.stmt) return null;
-  const nd = plan.byId.get(n);
-  if (!nd) return null;
-  const r = planCv.getBoundingClientRect();
-  return [r.left + planView.ox + (nd.x + NODE_W / 2) * planView.scale, r.top + planView.oy + (nd.y + NODE_H / 2) * planView.scale];
-}
-
-/* ---------- buffer pool grid ---------- */
-
-const poolCv = $("#pool");
-const poolCx = poolCv.getContext("2d");
-let poolGeom = null;
-
-function poolLayout(w, h, n) {
-  const pad = 14;
-  const aw = w - pad * 2, ah = h - pad * 2;
-  let best = null;
-  for (let cols = 1; cols <= n; cols++) {
-    const rows = Math.ceil(n / cols);
-    const size = Math.min(aw / cols, ah / rows);
-    if (!best || size > best.size) best = { cols, rows, size };
-  }
-  const gap = Math.max(2, Math.round(best.size * 0.08));
-  const cell = best.size - gap;
-  const gw = best.cols * best.size - gap, gh = best.rows * best.size - gap;
-  return { cols: best.cols, rows: best.rows, cell, step: best.size, ox: (w - gw) / 2, oy: (h - gh) / 2 };
-}
-
-function frameRect(f) {
-  const g = poolGeom;
-  const c = f % g.cols, r = Math.floor(f / g.cols);
-  return [g.ox + c * g.step, g.oy + r * g.step, g.cell, g.cell];
-}
-
-const KIND_GLYPH = { heap: "▤", header: "H", internal: "I", leaf: "L", spill: "S", meta: "M" };
-
-function drawPool(t) {
-  const { w, h, d } = fitCanvas(poolCv);
-  const cx = poolCx;
-  cx.setTransform(d, 0, 0, d, 0, 0);
-  cx.clearRect(0, 0, w, h);
-  const m = S.model;
-  if (!m) return;
-  poolGeom = poolLayout(w, h, m.frames.length);
-  const g = poolGeom;
-  S.flashes = S.flashes.filter((f) => t - f.t0 < 700);
-  const flashBy = new Map();
-  for (const f of S.flashes) if (f.f >= 0) flashBy.set(f.f, f);
-  const fontPx = clamp(g.cell * 0.26, 8, 15);
-  for (let f = 0; f < m.frames.length; f++) {
-    const [x, y, s] = frameRect(f);
-    const p = m.frames[f];
-    const fl = flashBy.get(f);
-    const k = fl ? 1 - (t - fl.t0) / 700 : 0;
-    const anim = S.frameAnim[f];
-    let scale = 1;
-    if (anim && anim.kind === "in") {
-      const a = (t - anim.t0) / 380;
-      if (a < 1) scale = 1 + 0.35 * Math.pow(1 - a, 3);
-    }
-    cx.save();
-    cx.translate(x + s / 2, y + s / 2);
-    cx.scale(scale, scale);
-    const hx = -s / 2, hy = -s / 2;
-    const r = Math.max(3, s * 0.14);
-    if (p == null) {
-      roundRect(cx, hx, hy, s, s, r);
-      cx.fillStyle = "rgba(255,255,255,0.015)";
-      cx.fill();
-      cx.setLineDash([2, 3]);
-      cx.strokeStyle = "rgba(142,162,200,0.16)";
-      cx.lineWidth = 1;
-      cx.stroke();
-      cx.setLineDash([]);
-    } else {
-      const col = ownerColor(m.owner.get(p));
-      if (fl && k > 0 && fl.kind !== "hit") {
-        cx.shadowColor = fl.color;
-        cx.shadowBlur = 22 * k * fl.strength;
-      }
-      roundRect(cx, hx, hy, s, s, r);
-      const bg = cx.createLinearGradient(hx, hy, hx + s, hy + s);
-      bg.addColorStop(0, hexA(col, 0.32));
-      bg.addColorStop(1, hexA(col, 0.1));
-      cx.fillStyle = bg;
-      cx.fill();
-      cx.shadowBlur = 0;
-      cx.strokeStyle = hexA(col, 0.7);
-      cx.lineWidth = 1.2;
-      cx.stroke();
-      if (fl && k > 0) {
-        roundRect(cx, hx, hy, s, s, r);
-        cx.strokeStyle = hexA(fl.color, 0.9 * k * fl.strength);
-        cx.lineWidth = 2;
-        cx.stroke();
-        if (fl.kind !== "hit") {
-          cx.fillStyle = hexA(fl.color, 0.13 * k * fl.strength);
-          cx.fill();
-        }
-      }
-      cx.fillStyle = "#f2f7ff";
-      cx.textAlign = "center";
-      cx.textBaseline = "middle";
-      cx.font = `800 ${fontPx}px ${MONO}`;
-      cx.fillText(String(p), 0, 1);
-      if (s > 26) {
-        const kind = m.kind.get(p);
-        cx.font = `700 ${clamp(s * 0.17, 7, 11)}px ${MONO}`;
-        cx.textAlign = "left";
-        cx.textBaseline = "top";
-        cx.fillStyle = hexA(col, 0.95);
-        cx.fillText(KIND_GLYPH[kind] || "", hx + 4, hy + 3);
-        const keys = m.keys.get(p);
-        if ((kind === "leaf" || kind === "internal") && keys != null) {
-          const frac = clamp(Math.log(1 + keys) / Math.log(1 + 600), 0.05, 1);
-          cx.fillStyle = hexA(col, 0.18);
-          cx.fillRect(hx + 4, hy + s - 6, s - 8, 2.5);
-          cx.fillStyle = hexA(col, 0.95);
-          cx.fillRect(hx + 4, hy + s - 6, (s - 8) * frac, 2.5);
-        }
-      }
-      if (m.dirty.has(p)) {
-        cx.fillStyle = C.magenta;
-        cx.shadowColor = C.magenta;
-        cx.shadowBlur = 6;
-        cx.beginPath();
-        cx.arc(hx + s - 5, hy + 5, 2.2, 0, Math.PI * 2);
-        cx.fill();
-        cx.shadowBlur = 0;
-      }
-    }
-    if (fl && fl.kind === "evict" && k > 0) {
-      const col = ownerColor(fl.o);
-      cx.globalAlpha = k;
-      cx.translate(0, -(1 - k) * s * 0.6);
-      cx.scale(0.4 + 0.6 * k, 0.4 + 0.6 * k);
-      roundRect(cx, hx, hy, s, s, r);
-      cx.strokeStyle = hexA(C.red, 0.9);
-      cx.lineWidth = 2;
-      cx.stroke();
-      cx.fillStyle = hexA(col, 0.25);
-      cx.fill();
-      cx.fillStyle = C.red;
-      cx.textAlign = "center";
-      cx.textBaseline = "middle";
-      cx.font = `800 ${fontPx}px ${MONO}`;
-      cx.fillText(String(fl.p), 0, 1);
-      cx.globalAlpha = 1;
-    }
-    cx.restore();
-    if (s > 30) {
-      cx.fillStyle = "rgba(142,162,200,0.28)";
-      cx.font = `600 ${clamp(s * 0.13, 7, 9)}px ${MONO}`;
-      cx.textAlign = "right";
-      cx.textBaseline = "alphabetic";
-      cx.fillText("f" + f, x + s - 4, y + s - 3);
-    }
-  }
-  cx.textBaseline = "alphabetic";
-}
-
-/* ---------- ARC lanes ---------- */
-
-const arcCv = $("#arc");
-const arcCx = arcCv.getContext("2d");
-
-function drawArc(t, dt) {
-  const { w, h, d } = fitCanvas(arcCv);
-  const cx = arcCx;
-  cx.setTransform(d, 0, 0, d, 0, 0);
-  cx.clearRect(0, 0, w, h);
-  const m = S.model;
-  if (!m) return;
-  const cap = m.frames.length;
-  const pad = 16;
-  const mid = w / 2;
-  const slot = (w - pad * 2) / (2 * cap);
-  const by = 40, bh = 34;
-  cx.fillStyle = "rgba(255,255,255,0.025)";
-  roundRect(cx, pad - 4, by - 6, w - 2 * pad + 8, bh + 12, 8);
-  cx.fill();
-  // resident window: the c frames centered on the split between T1 and T2
-  cx.strokeStyle = "rgba(255,255,255,0.08)";
-  cx.setLineDash([2, 4]);
-  cx.beginPath();
-  cx.moveTo(mid, by - 10); cx.lineTo(mid, by + bh + 10);
-  cx.stroke();
-  cx.setLineDash([]);
-  // labels
-  cx.font = `800 10px ${MONO}`;
-  cx.textBaseline = "alphabetic";
-  const counts = m.lanes.map((l) => l.length);
-  const label = (txt, x, align, col) => { cx.textAlign = align; cx.fillStyle = col; cx.fillText(txt, x, 18); };
-  label(`◁ B1 ghost ${counts[2]}`, pad, "left", hexA(C.violet, 0.85));
-  label(`T1 recent ${counts[0]}`, mid - 8, "right", C.cyan);
-  label(`${counts[1]} frequent T2`, mid + 8, "left", C.magenta);
-  label(`${counts[3]} ghost B2 ▷`, w - pad, "right", hexA(C.amber, 0.85));
-  // targets: where each page should sit
-  const want = new Map();
-  m.lanes[0].forEach((p, i) => want.set(p, [mid - (i + 1) * slot, 0]));
-  m.lanes[1].forEach((p, i) => want.set(p, [mid + i * slot, 1]));
-  m.lanes[2].forEach((p, i) => want.set(p, [mid - (counts[0] + i + 1) * slot, 2]));
-  m.lanes[3].forEach((p, i) => want.set(p, [mid + (counts[1] + i) * slot, 3]));
-  const ease = 1 - Math.pow(0.0005, dt);
-  for (const [p, [x, lane]] of want) {
-    const cur = S.arcPos.get(p);
-    const nx = cur ? lerp(cur.x, x, ease) : x;
-    S.arcPos.set(p, { x: nx, lane });
-  }
-  for (const p of [...S.arcPos.keys()]) if (!want.has(p)) S.arcPos.delete(p);
-  const sw = Math.max(1, slot - (slot > 4 ? 1 : 0.3));
-  for (const [p, { x, lane }] of S.arcPos) {
-    const col = ownerColor(m.owner.get(p));
-    if (x < pad - slot || x > w - pad + slot) continue;
-    if (lane >= 2) {
-      cx.fillStyle = hexA(col, 0.16);
-      cx.fillRect(x, by + 8, sw, bh - 16);
-      if (sw > 2.5) { cx.strokeStyle = hexA(col, 0.4); cx.lineWidth = 0.8; cx.strokeRect(x + 0.4, by + 8.4, sw - 0.8, bh - 16.8); }
-    } else {
-      cx.fillStyle = hexA(col, 0.8);
-      cx.fillRect(x, by, sw, bh);
-    }
-  }
-  // target p marker: where ARC wants T1 to end
-  const tx = mid - m.target * slot;
-  const shown = S.arcTarget == null ? tx : lerp(S.arcTarget, tx, ease);
-  S.arcTarget = shown;
-  cx.strokeStyle = C.green;
-  cx.shadowColor = C.green;
-  cx.shadowBlur = 10;
-  cx.lineWidth = 2;
-  cx.beginPath(); cx.moveTo(shown, by - 8); cx.lineTo(shown, by + bh + 8); cx.stroke();
-  cx.shadowBlur = 0;
-  cx.fillStyle = C.green;
-  cx.beginPath(); cx.moveTo(shown - 5, by + bh + 14); cx.lineTo(shown + 5, by + bh + 14); cx.lineTo(shown, by + bh + 8); cx.fill();
-  cx.font = `700 10px ${MONO}`;
-  cx.textAlign = shown < w / 2 ? "left" : "right";
-  cx.fillText(`target p = ${m.target}`, shown + (shown < w / 2 ? 8 : -8), by + bh + 24);
-  if (Math.abs(shown - mid) > 120) {
-    cx.fillStyle = C.ink3;
-    cx.textAlign = "center";
-    cx.font = `500 9.5px ${MONO}`;
-    cx.fillText(`${cap} frames`, mid, by + bh + 24);
-  }
-}
-
-/* ---------- overlay beams ---------- */
-
-const ovCv = $("#overlay");
-const ovCx = ovCv.getContext("2d");
-
-function drawOverlay(t) {
-  const { w, h, d } = fitCanvas(ovCv);
-  const cx = ovCx;
-  cx.setTransform(d, 0, 0, d, 0, 0);
-  cx.clearRect(0, 0, w, h);
-  if (!poolGeom) return;
-  const pr = poolCv.getBoundingClientRect();
-  const life = 700;
-  S.beams = S.beams.filter((b) => t - b.t0 < life);
-  cx.globalCompositeOperation = "lighter";
-  for (const b of S.beams) {
-    if (b.stmt !== S.model.stmt) continue;
-    const to = nodeScreenCenter(b.n);
-    if (!to) continue;
-    const [fx, fy, s] = frameRect(b.f);
-    const from = [pr.left + fx + s / 2, pr.top + fy + s / 2];
-    const k = (t - b.t0) / life;
-    const head = clamp(k * 1.6, 0, 1);
-    const tail = clamp(k * 1.6 - 0.45, 0, 1);
-    const ctrl = [(from[0] + to[0]) / 2, Math.min(from[1], to[1]) - 80];
-    const pt = (u) => {
-      const v = 1 - u;
-      return [v * v * from[0] + 2 * v * u * ctrl[0] + u * u * to[0], v * v * from[1] + 2 * v * u * ctrl[1] + u * u * to[1]];
-    };
-    cx.strokeStyle = hexA(b.color, 0.55 * (1 - k));
-    cx.lineWidth = 2;
-    cx.beginPath();
-    for (let u = tail; u <= head; u += 0.04) {
-      const [x, y] = pt(u);
-      if (u === tail) cx.moveTo(x, y); else cx.lineTo(x, y);
-    }
-    cx.stroke();
-    const [hx, hy] = pt(head);
-    const g = cx.createRadialGradient(hx, hy, 0, hx, hy, 10);
-    g.addColorStop(0, hexA("#ffffff", 0.9 * (1 - k)));
-    g.addColorStop(1, hexA(b.color, 0));
-    cx.fillStyle = g;
-    cx.beginPath(); cx.arc(hx, hy, 10, 0, Math.PI * 2); cx.fill();
-  }
-  cx.globalCompositeOperation = "source-over";
-}
 
 /* ---------- timeline ---------- */
 
@@ -1210,29 +655,6 @@ function drawResult() {
   }
 }
 
-/* ---------- background ---------- */
-
-function drawBackground() {
-  const cv = $("#bg");
-  const { w, h, d } = fitCanvas(cv);
-  const cx = cv.getContext("2d");
-  cx.setTransform(d, 0, 0, d, 0, 0);
-  const g1 = cx.createRadialGradient(w * 0.15, h * 0.05, 0, w * 0.15, h * 0.05, w * 0.7);
-  g1.addColorStop(0, "rgba(0,160,255,0.16)");
-  g1.addColorStop(1, "rgba(0,0,0,0)");
-  const g2 = cx.createRadialGradient(w * 0.9, h * 0.95, 0, w * 0.9, h * 0.95, w * 0.6);
-  g2.addColorStop(0, "rgba(255,43,214,0.12)");
-  g2.addColorStop(1, "rgba(0,0,0,0)");
-  cx.fillStyle = "#04060d";
-  cx.fillRect(0, 0, w, h);
-  cx.fillStyle = g1; cx.fillRect(0, 0, w, h);
-  cx.fillStyle = g2; cx.fillRect(0, 0, w, h);
-  cx.strokeStyle = "rgba(120,170,255,0.045)";
-  cx.lineWidth = 1;
-  for (let x = 0; x < w; x += 32) { cx.beginPath(); cx.moveTo(x + 0.5, 0); cx.lineTo(x + 0.5, h); cx.stroke(); }
-  for (let y = 0; y < h; y += 32) { cx.beginPath(); cx.moveTo(0, y + 0.5); cx.lineTo(w, y + 0.5); cx.stroke(); }
-}
-
 /* ---------- editor ---------- */
 
 const KEYWORDS = new Set(("select from where join on and or group by order limit insert into values update set delete create table index drop " +
@@ -1377,6 +799,7 @@ function applyState(st) {
   S.ownerColor.clear();
   setOwners(st.owners);
   S.model = modelFrom(st.pool);
+  scene.setFrames(st.frames);
   renderSchema(st);
   $("#engine-info").textContent = `cmudb · ${st.frames} frames · ARC · ${st.persistent ? "on disk" : "scratch db"}`;
   $("#txn").classList.toggle("hidden", !st.in_transaction);
@@ -1408,6 +831,160 @@ async function refreshSchema() {
   } catch (_) { /* the schema list is a convenience */ }
 }
 
+
+/* ---------- the 3D scene ---------- */
+
+const scene = createScene({
+  container: $("#stage"),
+  colors: C,
+  family: FAMILY,
+  ownerColor,
+  onPick(sel) { S.selection = sel; S.inspectKey = ""; },
+  onHover(sel, x, y) {
+    const tip = $("#tip");
+    const text = sel ? describeSelection(sel) : null;
+    if (!text) { tip.classList.add("hidden"); return; }
+    tip.innerHTML = text;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+    tip.classList.remove("hidden");
+  },
+});
+
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function planNode(id, stmt) {
+  const plan = S.plans[stmt];
+  return plan ? plan.byId.get(id) : null;
+}
+
+function nodeStats(id) {
+  const si = currentStmt();
+  const live = si === S.model.stmt;
+  return (live || S.model.stmt > si ? S.model.nodes[si + ":" + id] : null) || { rows: 0, batches: 0, state: "idle", hits: 0, misses: 0, news: 0, path: [] };
+}
+
+function laneOf(p) {
+  const i = S.model.lanes.findIndex((l) => l.includes(p));
+  return i < 0 ? null : LANES[i];
+}
+
+const LANE_NAME = { T1: "T1 · seen once", T2: "T2 · seen again", B1: "B1 · ghost", B2: "B2 · ghost" };
+
+function ownerOf(p) {
+  const o = S.owners.find((x) => x.id === S.model.owner.get(p));
+  return o || { name: "catalog", kind: "system", id: null };
+}
+
+function describeSelection(sel) {
+  const m = S.model;
+  if (!m) return null;
+  if (sel.type === "frame") {
+    const p = m.frames[sel.f];
+    if (p == null) return `frame <b>${sel.f}</b> · empty`;
+    return `frame <b>${sel.f}</b> · page <b>${p}</b> · ${escapeHtml(ownerOf(p).name)} ${m.kind.get(p) || ""}`;
+  }
+  if (sel.type === "page") {
+    return `page <b>${sel.p}</b> · ${LANE_NAME[laneOf(sel.p)] || "gone"} · ${escapeHtml(ownerOf(sel.p).name)}`;
+  }
+  if (sel.type === "node") {
+    const n = planNode(sel.id, sel.stmt);
+    if (!n) return null;
+    return `<b>${escapeHtml(n.op)}</b> · ${escapeHtml(n.title)} · ${fmt(nodeStats(sel.id).rows)} rows`;
+  }
+  if (sel.type === "disk") return `<b>disk</b> · ${fmt(m.counters.reads - (S.trace ? S.trace.before.counters.reads : m.counters.reads))} reads this run`;
+  return null;
+}
+
+function kv(rows) {
+  return "<dl>" + rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join("") + "</dl>";
+}
+
+function drawInspector() {
+  const el = $("#inspect");
+  const sel = S.selection;
+  const m = S.model;
+  let html;
+  if (!sel || !m) {
+    html = '<div class="idle">click a plan node, a frame, a lane page or the disk<br>drag to orbit · scroll to zoom · right drag to pan</div>';
+  } else if (sel.type === "frame" || sel.type === "page") {
+    const p = sel.type === "frame" ? m.frames[sel.f] : sel.p;
+    const f = p == null ? sel.f : m.frames.indexOf(p);
+    if (p == null) {
+      html = `<h3 style="color:${C.ink3}">frame ${sel.f}</h3><h2>empty</h2><div class="detail">no page is loaded here right now</div>`;
+    } else {
+      const o = ownerOf(p);
+      const color = ownerColor(o.id);
+      const kind = m.kind.get(p);
+      const keys = m.keys.get(p);
+      html = `<h3 style="color:${color}">${f >= 0 ? `frame ${f} · ` : ""}${escapeHtml(o.kind)}</h3><h2>page ${p}</h2>` + kv([
+        ["owner", escapeHtml(o.name)],
+        ["page kind", escapeHtml(kind || "heap")],
+        ...(keys != null ? [["keys", fmt(keys)]] : []),
+        ["arc list", escapeHtml(LANE_NAME[laneOf(p)] || "none")],
+        ["resident", f >= 0 ? `yes, frame ${f}` : "no"],
+        ["dirty", m.dirty.has(p) ? '<span style="color:#ff2bd6">yes</span>' : "no"],
+      ]);
+    }
+  } else if (sel.type === "node") {
+    const n = planNode(sel.id, sel.stmt);
+    if (!n || sel.stmt !== currentStmt()) {
+      html = '<div class="idle">that plan belongs to another statement</div>';
+    } else {
+      const ns = nodeStats(sel.id);
+      const color = FAMILY[n.family] || C.cyan;
+      html = `<h3 style="color:${color}">${escapeHtml(n.op)} · node ${n.id}</h3><h2>${escapeHtml(n.title)}</h2>` +
+        (n.detail.length ? `<div class="detail">${n.detail.map(escapeHtml).join("<br>")}</div>` : "") + kv([
+          ["state", escapeHtml(ns.state)],
+          ["rows out", fmt(ns.rows)],
+          ["batches", fmt(ns.batches)],
+          ["page hits", fmt(ns.hits)],
+          ["page misses", fmt(ns.misses)],
+          ["new pages", fmt(ns.news)],
+        ]) + (ns.path.length ? '<div class="path">' + ns.path.map(([p, k]) =>
+          `<span style="color:${k === "leaf" ? C.green : k === "internal" ? C.violet : C.cyan}">${k} ${p}</span>`).join("") + "</div>" : "");
+    }
+  } else if (sel.type === "disk") {
+    const b = S.trace ? S.trace.before.counters : m.counters;
+    html = `<h3 style="color:${C.violet}">disk manager</h3><h2>disk</h2>` + kv([
+      ["reads this run", fmt(m.counters.reads - b.reads)],
+      ["writes this run", fmt(m.counters.writes - b.writes)],
+      ["pages allocated", fmt(m.counters.allocs - b.allocs)],
+    ]);
+  }
+  if (html !== S.inspectHtml) { el.innerHTML = html; S.inspectHtml = html; }
+}
+
+/* ---------- camera buttons ---------- */
+
+document.querySelectorAll("#views [data-view]").forEach((b) => {
+  b.addEventListener("click", () => {
+    scene.fly(b.dataset.view);
+    document.querySelectorAll("#views [data-view]").forEach((x) => x.classList.toggle("on", x === b));
+  });
+});
+$("#orbit").addEventListener("click", () => {
+  scene.setAutoRotate(!scene.autoRotate);
+  $("#orbit").classList.toggle("on", scene.autoRotate);
+});
+
+function insets() {
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  const rect = (sel) => { const el = $(sel); return el && el.offsetParent !== null ? el.getBoundingClientRect() : null; };
+  const left = rect("#left");
+  const right = rect("#right");
+  const top = rect("#top");
+  const bottom = rect("#bottom");
+  const narrow = W < 1100;
+  return {
+    left: !narrow && left ? left.right : 0,
+    right: !narrow && right ? W - right.left : 0,
+    top: top ? top.bottom : 0,
+    bottom: narrow ? H - (left ? left.top : H) : bottom ? H - bottom.top : 0,
+  };
+}
+
 /* ---------- main loop ---------- */
 
 function frame() {
@@ -1415,22 +992,34 @@ function frame() {
   const dt = Math.min(0.1, (t - S.lastTick) / 1000);
   S.lastTick = t;
   advance(dt);
-  drawPlan(t);
-  drawPool(t);
-  drawArc(t, dt);
-  drawOverlay(t);
+  const si = currentStmt();
+  const plan = si >= 0 ? S.plans[si] : null;
+  if (S.planShown !== plan) {
+    S.planShown = plan;
+    scene.setPlan(plan, si);
+  }
+  const msg = $("#stage-msg");
+  const st = S.trace && si >= 0 ? S.trace.statements[si] : null;
+  if (!S.trace) { msg.textContent = "run a query to light up the plan"; msg.classList.remove("hidden"); }
+  else if (st && !plan) {
+    const kw = st.sql.trim().split(/\s+/)[0].toUpperCase();
+    msg.textContent = `${kw} · ${st.outcome.kind === "error" ? "failed before it ran" : "runs without a plan tree"}`;
+    msg.classList.remove("hidden");
+  } else msg.classList.add("hidden");
+  scene.setInsets(insets());
+  scene.update(t, dt, S.model, nodeStats);
   drawTimeline();
   drawMeters(t);
   drawLegend();
   drawTicker();
   drawResult();
+  drawInspector();
   requestAnimationFrame(frame);
 }
 
-window.addEventListener("resize", () => { drawBackground(); S.timelineImg = null; });
+window.addEventListener("resize", () => { S.timelineImg = null; });
 
 async function boot() {
-  drawBackground();
   buildSpeeds();
   const res = await fetch("/api/state");
   const st = await res.json();
@@ -1446,10 +1035,17 @@ async function boot() {
   const first = st.examples.find((e) => e.label === "hash join") || st.examples[0];
   sqlEl.value = first ? first.sql : "SELECT * FROM users;";
   syncEditor();
+  scene.resize();
   requestAnimationFrame(frame);
+  document.fonts.ready.then(() => scene.redrawCards());
   const params = new URLSearchParams(location.search);
   if (params.has("sql")) { sqlEl.value = params.get("sql"); syncEditor(); }
   if (params.has("speed")) S.speed = +params.get("speed");
+  if (params.has("view")) {
+    const b = document.querySelector(`#views [data-view="${params.get("view")}"]`);
+    if (b) setTimeout(() => b.click(), 50);
+  }
+  if (params.has("orbit")) { scene.setAutoRotate(true); $("#orbit").classList.add("on"); }
   if (!params.has("norun")) setTimeout(run, 500);
 }
 
